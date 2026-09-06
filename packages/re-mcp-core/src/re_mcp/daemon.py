@@ -76,8 +76,7 @@ def resolve_bearer_token(environ: dict[str, str] | None = None) -> str:
         or any(character.isspace() for character in value)
     ):
         raise ValueError(
-            "RE_MCP_BEARER_TOKEN must contain 1-4096 printable ASCII "
-            "characters without whitespace"
+            "RE_MCP_BEARER_TOKEN must contain 1-4096 printable ASCII characters without whitespace"
         )
     return value
 
