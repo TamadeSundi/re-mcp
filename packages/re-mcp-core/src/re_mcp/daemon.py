@@ -22,6 +22,7 @@ import socket
 import sys
 import tempfile
 import time
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -61,7 +62,7 @@ class BearerTokenAuth(AuthProvider):
         return None
 
 
-def resolve_bearer_token(environ: dict[str, str] | None = None) -> str:
+def resolve_bearer_token(environ: Mapping[str, str] | None = None) -> str:
     """Return an explicit fixed token or preserve the random-token default."""
 
     source = os.environ if environ is None else environ
@@ -79,6 +80,17 @@ def resolve_bearer_token(environ: dict[str, str] | None = None) -> str:
             "RE_MCP_BEARER_TOKEN must contain 1-4096 printable ASCII characters without whitespace"
         )
     return value
+
+
+def consume_bearer_token(
+    environ: MutableMapping[str, str] | None = None,
+) -> str:
+    """Resolve once, then keep the daemon secret out of worker environments."""
+
+    source = os.environ if environ is None else environ
+    token = resolve_bearer_token(source)
+    source.pop(BEARER_TOKEN_ENV, None)
+    return token
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +337,7 @@ def serve(
         )
 
     state_dir_name = backend.info().state_dir_name
-    token = resolve_bearer_token()
+    token = consume_bearer_token()
     auth = BearerTokenAuth(token)
     # lifespan=None skips the stdio-mode signal handlers (uvicorn manages
     # its own signal handling for graceful shutdown).

@@ -21,6 +21,7 @@ from re_mcp.daemon import (
     BearerTokenAuth,
     _is_loopback,
     _state_dir,
+    consume_bearer_token,
     daemon_alive,
     read_state,
     remove_state,
@@ -202,6 +203,12 @@ class TestResolveBearerToken:
         with pytest.raises(ValueError) as rejected:
             resolve_bearer_token({BEARER_TOKEN_ENV: value})
         assert value not in str(rejected.value)
+
+    def test_consume_removes_fixed_token_before_worker_spawn(self):
+        environment = {BEARER_TOKEN_ENV: "fixed-token", "UNRELATED": "kept"}
+
+        assert consume_bearer_token(environment) == "fixed-token"
+        assert environment == {"UNRELATED": "kept"}
 
 
 # ---------------------------------------------------------------------------
