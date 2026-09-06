@@ -75,6 +75,7 @@ uvx re-mcp-ghidra
 | `GHIDRA_MCP_LOG_LEVEL` | `WARNING` | Logging level |
 | `GHIDRA_MCP_LOG_DIR` | *(unset)* | Directory for per-run log files |
 | `GHIDRA_MCP_IDLE_TIMEOUT` | `300` | Auto-shutdown timeout in seconds (0 to disable) |
+| `RE_MCP_BEARER_TOKEN` | *(random)* | Fixed HTTP daemon bearer token; printable ASCII without whitespace. Unset preserves the random default. |
 
 ## Features
 

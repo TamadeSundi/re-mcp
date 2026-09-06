@@ -17,12 +17,14 @@ import stat
 
 import pytest
 from re_mcp.daemon import (
+    BEARER_TOKEN_ENV,
     BearerTokenAuth,
     _is_loopback,
     _state_dir,
     daemon_alive,
     read_state,
     remove_state,
+    resolve_bearer_token,
     write_state,
 )
 
@@ -173,6 +175,33 @@ class TestBearerTokenAuth:
     async def test_timing_safe(self):
         auth = BearerTokenAuth("a" * 64)
         assert await auth.verify_token("b" * 64) is None
+
+
+class TestResolveBearerToken:
+    def test_explicit_token_is_used_exactly(self):
+        token = "fixed-token_ABC.123"
+        assert resolve_bearer_token({BEARER_TOKEN_ENV: token}) == token
+
+    def test_unset_preserves_random_default(self, monkeypatch):
+        monkeypatch.setattr("re_mcp.daemon.secrets.token_hex", lambda size: f"random-{size}")
+        assert resolve_bearer_token({}) == "random-32"
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "contains space", "contains\nnewline", "nönascii", "\x00control"],
+    )
+    def test_invalid_explicit_token_fails_without_echo(self, value):
+        with pytest.raises(ValueError) as rejected:
+            resolve_bearer_token({BEARER_TOKEN_ENV: value})
+        if value:
+            assert value not in str(rejected.value)
+        assert BEARER_TOKEN_ENV in str(rejected.value)
+
+    def test_excessive_token_fails_without_echo(self):
+        value = "x" * 4097
+        with pytest.raises(ValueError) as rejected:
+            resolve_bearer_token({BEARER_TOKEN_ENV: value})
+        assert value not in str(rejected.value)
 
 
 # ---------------------------------------------------------------------------

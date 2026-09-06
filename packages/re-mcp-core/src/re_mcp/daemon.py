@@ -40,6 +40,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+BEARER_TOKEN_ENV = "RE_MCP_BEARER_TOKEN"
+
 
 # ---------------------------------------------------------------------------
 # Bearer token auth
@@ -57,6 +59,27 @@ class BearerTokenAuth(AuthProvider):
         if secrets.compare_digest(token, self._expected_token):
             return AccessToken(token=token, client_id="local", scopes=[])
         return None
+
+
+def resolve_bearer_token(environ: dict[str, str] | None = None) -> str:
+    """Return an explicit fixed token or preserve the random-token default."""
+
+    source = os.environ if environ is None else environ
+    if BEARER_TOKEN_ENV not in source:
+        return secrets.token_hex(32)
+    value = source[BEARER_TOKEN_ENV]
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 4096
+        or not value.isascii()
+        or not value.isprintable()
+        or any(character.isspace() for character in value)
+    ):
+        raise ValueError(
+            "RE_MCP_BEARER_TOKEN must contain 1-4096 printable ASCII "
+            "characters without whitespace"
+        )
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +326,7 @@ def serve(
         )
 
     state_dir_name = backend.info().state_dir_name
-    token = secrets.token_hex(32)
+    token = resolve_bearer_token()
     auth = BearerTokenAuth(token)
     # lifespan=None skips the stdio-mode signal handlers (uvicorn manages
     # its own signal handling for graceful shutdown).

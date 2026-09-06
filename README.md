@@ -316,6 +316,12 @@ Each backend uses its own environment variable prefix (`IDA_MCP_` or `GHIDRA_MCP
 | `<PREFIX>DISABLE_BATCH` | *(unset)* | Set to `1`, `true`, `yes`, or `on` to hide the `batch` meta-tool |
 | `<PREFIX>DISABLE_TOOL_SEARCH` | *(unset)* | Set to `1`, `true`, `yes`, or `on` to disable server-side progressive tool disclosure — all tools become directly visible and callable, and the `search_tools` and `get_schema` meta-tools are removed. Useful with clients that provide their own tool deferral (e.g. Claude Code). |
 
+For a directly launched HTTP daemon, `RE_MCP_BEARER_TOKEN` may contain an
+explicit fixed bearer token. It must be 1–4096 printable ASCII characters with
+no whitespace. When it is unset, `serve` preserves the default random token.
+The token is never written to logs; the existing restricted daemon state file
+continues to carry it for local proxy compatibility.
+
 **IDA-only settings:**
 
 | Variable | Default | Description |
