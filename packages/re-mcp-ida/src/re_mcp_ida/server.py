@@ -90,7 +90,7 @@ def main():
     """
     import re_mcp_ida  # noqa: PLC0415
 
-    re_mcp_ida.configure_logging()
+    re_mcp_ida.configure_logging(env_prefix="IDA_MCP_")
 
     # bootstrap() loads idalib — must happen before any ida_* imports,
     # and is deferred to main() so that importing this module for its

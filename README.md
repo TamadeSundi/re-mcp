@@ -316,6 +316,12 @@ Each backend uses its own environment variable prefix (`IDA_MCP_` or `GHIDRA_MCP
 | `<PREFIX>DISABLE_BATCH` | *(unset)* | Set to `1`, `true`, `yes`, or `on` to hide the `batch` meta-tool |
 | `<PREFIX>DISABLE_TOOL_SEARCH` | *(unset)* | Set to `1`, `true`, `yes`, or `on` to disable server-side progressive tool disclosure — all tools become directly visible and callable, and the `search_tools` and `get_schema` meta-tools are removed. Useful with clients that provide their own tool deferral (e.g. Claude Code). |
 
+For log directory and run-ID selection, the active backend's `LOG_DIR` and
+`LOG_RUN` values take precedence. `RE_MCP_LOG_DIR` / `RE_MCP_LOG_RUN` remain
+the generic fallback; for non-IDA backends, the legacy `IDA_MCP_LOG_DIR` /
+`IDA_MCP_LOG_RUN` pair is the final fallback. This precedence does not change
+`LOG_LEVEL` or `LABEL` handling.
+
 For a directly launched HTTP daemon, `RE_MCP_BEARER_TOKEN` may contain an
 explicit fixed bearer token. It must be 1–4096 printable ASCII characters with
 no whitespace. When it is unset, `serve` preserves the default random token.

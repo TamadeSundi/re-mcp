@@ -15,6 +15,8 @@ import pytest
 from re_mcp import _sanitize_label, configure_logging, ensure_run_id, resolve_log_file
 from re_mcp.worker_provider import WorkerPoolProvider, _enrich_spawn_error
 from re_mcp_ghidra.backend import GhidraBackend
+from re_mcp_ida.backend import IDABackend
+from re_mcp_ida.server import main as ida_worker_main
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +108,16 @@ def test_backend_log_directory_falls_back_to_generic(monkeypatch, tmp_path):
     assert os.environ["GHIDRA_MCP_LOG_RUN"] == "generic-run"
 
 
+def test_ida_log_directory_falls_back_to_generic(monkeypatch, tmp_path):
+    monkeypatch.setenv("RE_MCP_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("RE_MCP_LOG_RUN", "generic-run")
+
+    result = resolve_log_file("worker", env_key="IDA_MCP_LOG_DIR")
+
+    assert result == str(tmp_path / "generic-run-worker.log")
+    assert os.environ["IDA_MCP_LOG_RUN"] == "generic-run"
+
+
 def test_default_log_directory_still_falls_back_to_ida(monkeypatch, tmp_path):
     monkeypatch.setenv("IDA_MCP_LOG_DIR", str(tmp_path))
     monkeypatch.setenv("IDA_MCP_LOG_RUN", "ida-run")
@@ -152,6 +164,59 @@ def test_configure_logging_uses_backend_directory_without_logging_secrets(monkey
     assert sentinel not in content
     assert "RE_MCP_BEARER_TOKEN" not in content
     assert "HTTP_AUTHORIZATION" not in content
+
+
+def test_ida_components_use_one_backend_log_directory_and_run(monkeypatch, tmp_path):
+    ida_dir = tmp_path / "ida"
+    generic_dir = tmp_path / "generic"
+    monkeypatch.setenv("IDA_MCP_LOG_DIR", str(ida_dir))
+    monkeypatch.setenv("IDA_MCP_LOG_RUN", "ida-run")
+    monkeypatch.setenv("RE_MCP_LOG_DIR", str(generic_dir))
+    monkeypatch.setenv("RE_MCP_LOG_RUN", "generic-run")
+
+    root = logging.getLogger()
+    existing_handlers = list(root.handlers)
+    try:
+        # These are the labels used by the direct supervisor, HTTP daemon,
+        # and IDA worker respectively.
+        configure_logging(label="supervisor", env_prefix="IDA_MCP_")
+        configure_logging(label="daemon", env_prefix="IDA_MCP_")
+        configure_logging(label="worker-ntoskrnl", env_prefix="IDA_MCP_")
+
+        pool = WorkerPoolProvider(backend=IDABackend)
+        with patch("re_mcp.worker_provider.StdioTransport") as transport_class:
+            pool._worker_transport("ntoskrnl")
+        transport_kwargs = transport_class.call_args.kwargs
+
+        hint = _enrich_spawn_error(
+            BrokenPipeError("closed"),
+            label="ntoskrnl",
+            log_dir_env_key="IDA_MCP_LOG_DIR",
+        )
+    finally:
+        for handler in list(root.handlers):
+            if handler not in existing_handlers:
+                root.removeHandler(handler)
+                handler.close()
+
+    assert (ida_dir / "ida-run-supervisor.log").is_file()
+    assert (ida_dir / "ida-run-daemon.log").is_file()
+    assert (ida_dir / "ida-run-worker-ntoskrnl.log").is_file()
+    assert transport_kwargs["log_file"] == Path(ida_dir / "ida-run-worker-ntoskrnl.stderr")
+    assert transport_kwargs["env"]["IDA_MCP_LOG_RUN"] == "ida-run"
+    assert str(ida_dir / "ida-run-worker-ntoskrnl.stderr") in hint
+    assert not generic_dir.exists()
+
+
+def test_ida_worker_entrypoint_selects_ida_logging_prefix():
+    with (
+        patch("re_mcp_ida.configure_logging") as configure,
+        patch("re_mcp_ida.bootstrap", side_effect=SystemExit),
+        pytest.raises(SystemExit),
+    ):
+        ida_worker_main()
+
+    configure.assert_called_once_with(env_prefix="IDA_MCP_")
 
 
 def test_ghidra_worker_transport_shares_backend_directory_and_run(monkeypatch, tmp_path):
