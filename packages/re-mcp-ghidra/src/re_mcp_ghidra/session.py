@@ -69,7 +69,7 @@ class Session:
             LanguageID,
         )
         from ghidra.util.task import TaskMonitor  # noqa: PLC0415
-        from java.io import File  # noqa: PLC0415
+        from java.io import File, FileNotFoundException  # noqa: PLC0415
 
         path = os.path.realpath(os.path.expanduser(file_path))
 
@@ -103,7 +103,10 @@ class Session:
 
             if os.path.exists(project_file):
                 project = GhidraProject.openProject(project_location, project_name)
-                program = project.openProgram("/", binary_name, False)
+                try:
+                    program = project.openProgram("/", binary_name, False)
+                except FileNotFoundException:
+                    program = None
                 if program is None:
                     program = project.importProgram(File(path))
                     if program is None:
