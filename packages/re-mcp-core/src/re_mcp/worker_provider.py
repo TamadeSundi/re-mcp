@@ -121,7 +121,12 @@ def _is_transport_closed(exc: BaseException) -> bool:
     return any(m in msg for m in _TRANSPORT_CLOSED_MARKERS)
 
 
-def _enrich_spawn_error(exc: BaseException, label: str = "bootstrap") -> str:
+def _enrich_spawn_error(
+    exc: BaseException,
+    label: str = "bootstrap",
+    *,
+    log_dir_env_key: str = "RE_MCP_LOG_DIR",
+) -> str:
     """Build a diagnostic spawn-error message.
 
     The low-level transport-closed errors are opaque — the worker could
@@ -136,7 +141,7 @@ def _enrich_spawn_error(exc: BaseException, label: str = "bootstrap") -> str:
     msg = str(exc)
     if not _is_transport_closed(exc):
         return msg
-    resolved = resolve_log_file(f"worker-{label}", suffix=".stderr")
+    resolved = resolve_log_file(f"worker-{label}", suffix=".stderr", env_key=log_dir_env_key)
     detail = (
         f"worker stderr: {resolved}"
         if resolved
@@ -870,16 +875,18 @@ class WorkerPoolProvider(Provider):
     def _worker_transport(self, label: str = "bootstrap") -> StdioTransport:
         info = self._backend_info
         env = dict(os.environ)
+        log_dir_env_key = f"{info.env_prefix}LOG_DIR"
+        log_run_env_key = f"{info.env_prefix}LOG_RUN"
         # Propagate the supervisor's run ID and label to the worker so
         # its Python logging file and our stderr-capture file share a
         # timestamp prefix and disambiguating label on disk.
-        env[f"{info.env_prefix}LOG_RUN"] = ensure_run_id()
+        env[log_run_env_key] = ensure_run_id(env_key=log_run_env_key)
         env[f"{info.env_prefix}LABEL"] = f"worker-{label}"
         # Worker raw stderr (fd 2) is captured to a .stderr file when
         # the log dir env var is set; this catches pre-logging output
         # and C-level crashes that Python logging can't see.  Each
         # worker gets its own file so concurrent workers don't interleave.
-        log_file = resolve_log_file(f"worker-{label}", suffix=".stderr")
+        log_file = resolve_log_file(f"worker-{label}", suffix=".stderr", env_key=log_dir_env_key)
         return StdioTransport(
             command=sys.executable,
             args=["-m", info.worker_module],
@@ -1533,7 +1540,11 @@ class WorkerPoolProvider(Provider):
         except Exception as exc:
             log.warning("Background spawn failed for %s: %s", db_id, exc, exc_info=True)
             await _mark_failed()
-            worker._spawn_error = _enrich_spawn_error(exc, label=db_id)
+            worker._spawn_error = _enrich_spawn_error(
+                exc,
+                label=db_id,
+                log_dir_env_key=f"{self._backend_info.env_prefix}LOG_DIR",
+            )
             worker._ready_event.set()
             await self._session_log(
                 mcp_session, "error", f"Failed to open {db_id}: {worker._spawn_error}"
@@ -1777,7 +1788,12 @@ class WorkerPoolProvider(Provider):
             if worker.state == WorkerState.DEAD:
                 return
             stderr_hint = (
-                resolve_log_file(f"worker-{db_id}", suffix=".stderr") or "<LOG_DIR not set>"
+                resolve_log_file(
+                    f"worker-{db_id}",
+                    suffix=".stderr",
+                    env_key=f"{self._backend_info.env_prefix}LOG_DIR",
+                )
+                or "<LOG_DIR not set>"
             )
             log.warning(
                 "Worker %s (pid=%d) exited unexpectedly (%s); check stderr: %s",

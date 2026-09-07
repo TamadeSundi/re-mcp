@@ -73,7 +73,7 @@ def main():
     """Entry point for the ``re-mcp-ghidra-worker`` script."""
     import re_mcp_ghidra  # noqa: PLC0415
 
-    re_mcp_ghidra.configure_logging()
+    re_mcp_ghidra.configure_logging(env_prefix="GHIDRA_MCP_")
     re_mcp_ghidra.bootstrap()
 
     from re_mcp_ghidra import resources as ghidra_resources  # noqa: PLC0415

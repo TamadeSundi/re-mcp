@@ -73,7 +73,7 @@ uvx re-mcp-ghidra
 | `GHIDRA_INSTALL_DIR` | *(auto-detected)* | Path to Ghidra installation directory |
 | `GHIDRA_MCP_MAX_WORKERS` | *(unlimited)* | Maximum simultaneous databases (1-8) |
 | `GHIDRA_MCP_LOG_LEVEL` | `WARNING` | Logging level |
-| `GHIDRA_MCP_LOG_DIR` | *(unset)* | Directory for per-run log files |
+| `GHIDRA_MCP_LOG_DIR` | *(unset)* | Directory for per-run supervisor, worker, and raw worker stderr log files |
 | `GHIDRA_MCP_IDLE_TIMEOUT` | `300` | Auto-shutdown timeout in seconds (0 to disable) |
 | `RE_MCP_BEARER_TOKEN` | *(random)* | Fixed HTTP daemon bearer token; printable ASCII without whitespace. Unset preserves the random default. |
 

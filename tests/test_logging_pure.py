@@ -6,10 +6,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-from re_mcp import _sanitize_label, ensure_run_id, resolve_log_file
+from re_mcp import _sanitize_label, configure_logging, ensure_run_id, resolve_log_file
+from re_mcp.worker_provider import WorkerPoolProvider, _enrich_spawn_error
+from re_mcp_ghidra.backend import GhidraBackend
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +23,10 @@ def _clear_env(monkeypatch):
     monkeypatch.delenv("RE_MCP_LOG_DIR", raising=False)
     monkeypatch.delenv("IDA_MCP_LOG_RUN", raising=False)
     monkeypatch.delenv("IDA_MCP_LOG_DIR", raising=False)
+    monkeypatch.delenv("GHIDRA_MCP_LOG_RUN", raising=False)
+    monkeypatch.delenv("GHIDRA_MCP_LOG_DIR", raising=False)
+    monkeypatch.delenv("GHIDRA_MCP_LABEL", raising=False)
+    monkeypatch.delenv("GHIDRA_MCP_LOG_LEVEL", raising=False)
 
 
 def test_resolve_log_file_unset_returns_none():
@@ -71,6 +80,105 @@ def test_resolve_log_file_shares_run_id_across_calls(monkeypatch, tmp_path):
     prefix_first = os.path.basename(first).split("-supervisor")[0]
     prefix_second = os.path.basename(second).split("-worker-x")[0]
     assert prefix_first == prefix_second
+
+
+def test_resolve_log_file_uses_backend_specific_directory_and_run(monkeypatch, tmp_path):
+    generic_dir = tmp_path / "generic"
+    ghidra_dir = tmp_path / "ghidra"
+    monkeypatch.setenv("RE_MCP_LOG_DIR", str(generic_dir))
+    monkeypatch.setenv("RE_MCP_LOG_RUN", "generic-run")
+    monkeypatch.setenv("GHIDRA_MCP_LOG_DIR", str(ghidra_dir))
+    monkeypatch.setenv("GHIDRA_MCP_LOG_RUN", "ghidra-run")
+
+    result = resolve_log_file("supervisor", env_key="GHIDRA_MCP_LOG_DIR")
+
+    assert result == str(ghidra_dir / "ghidra-run-supervisor.log")
+    assert not generic_dir.exists()
+
+
+def test_backend_log_directory_falls_back_to_generic(monkeypatch, tmp_path):
+    monkeypatch.setenv("RE_MCP_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("RE_MCP_LOG_RUN", "generic-run")
+
+    result = resolve_log_file("supervisor", env_key="GHIDRA_MCP_LOG_DIR")
+
+    assert result == str(tmp_path / "generic-run-supervisor.log")
+    assert os.environ["GHIDRA_MCP_LOG_RUN"] == "generic-run"
+
+
+def test_default_log_directory_still_falls_back_to_ida(monkeypatch, tmp_path):
+    monkeypatch.setenv("IDA_MCP_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("IDA_MCP_LOG_RUN", "ida-run")
+
+    result = resolve_log_file("supervisor")
+
+    assert result == str(tmp_path / "ida-run-supervisor.log")
+    assert os.environ["RE_MCP_LOG_RUN"] == "ida-run"
+
+
+def test_resolve_log_file_propagates_directory_creation_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("GHIDRA_MCP_LOG_DIR", str(tmp_path / "unwritable"))
+
+    with (
+        patch("re_mcp.os.makedirs", side_effect=PermissionError("denied")),
+        pytest.raises(PermissionError, match="denied"),
+    ):
+        resolve_log_file("supervisor", env_key="GHIDRA_MCP_LOG_DIR")
+
+
+def test_configure_logging_uses_backend_directory_without_logging_secrets(monkeypatch, tmp_path):
+    sentinel = "SENTINEL_BEARER_MUST_NOT_APPEAR"
+    monkeypatch.setenv("GHIDRA_MCP_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("GHIDRA_MCP_LOG_RUN", "ghidra-run")
+    monkeypatch.setenv("RE_MCP_BEARER_TOKEN", sentinel)
+    monkeypatch.setenv("HTTP_AUTHORIZATION", f"Bearer {sentinel}")
+
+    root = logging.getLogger()
+    existing_handlers = list(root.handlers)
+    try:
+        configure_logging(label="supervisor", env_prefix="GHIDRA_MCP_")
+        logging.getLogger("re_mcp.logging_test").error("safe diagnostic marker")
+        for handler in root.handlers:
+            handler.flush()
+
+        content = (tmp_path / "ghidra-run-supervisor.log").read_text()
+    finally:
+        for handler in list(root.handlers):
+            if handler not in existing_handlers:
+                root.removeHandler(handler)
+                handler.close()
+
+    assert "safe diagnostic marker" in content
+    assert sentinel not in content
+    assert "RE_MCP_BEARER_TOKEN" not in content
+    assert "HTTP_AUTHORIZATION" not in content
+
+
+def test_ghidra_worker_transport_shares_backend_directory_and_run(monkeypatch, tmp_path):
+    monkeypatch.setenv("GHIDRA_MCP_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("GHIDRA_MCP_LOG_RUN", "ghidra-run")
+    pool = WorkerPoolProvider(backend=GhidraBackend)
+
+    with patch("re_mcp.worker_provider.StdioTransport") as transport_class:
+        pool._worker_transport("ntoskrnl")
+
+    kwargs = transport_class.call_args.kwargs
+    assert kwargs["log_file"] == Path(tmp_path / "ghidra-run-worker-ntoskrnl.stderr")
+    assert kwargs["env"]["GHIDRA_MCP_LOG_RUN"] == "ghidra-run"
+    assert kwargs["env"]["GHIDRA_MCP_LABEL"] == "worker-ntoskrnl"
+
+
+def test_spawn_error_hint_uses_backend_log_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("GHIDRA_MCP_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("GHIDRA_MCP_LOG_RUN", "ghidra-run")
+
+    result = _enrich_spawn_error(
+        BrokenPipeError("closed"),
+        label="ntoskrnl",
+        log_dir_env_key="GHIDRA_MCP_LOG_DIR",
+    )
+
+    assert str(tmp_path / "ghidra-run-worker-ntoskrnl.stderr") in result
 
 
 def test_ensure_run_id_respects_preexisting_env(monkeypatch):

@@ -28,6 +28,7 @@ from re_mcp.proxy import (
     _wait_for_exit,
     stop,
 )
+from re_mcp_ghidra.backend import GhidraBackend
 from re_mcp_ida.backend import IDABackend
 
 # ---------------------------------------------------------------------------
@@ -343,6 +344,22 @@ class TestSpawnDaemon:
             pytest.raises(RuntimeError, match=stderr_path),
         ):
             _spawn_daemon(IDABackend)
+
+    def test_ghidra_stderr_uses_backend_log_directory(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1
+
+        with (
+            patch("re_mcp.proxy.resolve_log_file", return_value=None) as resolve_log,
+            patch("subprocess.Popen", return_value=mock_proc),
+            patch("re_mcp.proxy.read_state", return_value=None),
+            pytest.raises(RuntimeError, match="exited immediately with code 1"),
+        ):
+            _spawn_daemon(GhidraBackend)
+
+        resolve_log.assert_called_once_with(
+            "daemon-spawn", suffix=".stderr", env_key="GHIDRA_MCP_LOG_DIR"
+        )
 
     def test_windows_shim_exits_but_daemon_starts(self, monkeypatch):
         """On Windows the launcher/shim may exit immediately while the real

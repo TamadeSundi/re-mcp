@@ -184,7 +184,7 @@ def _spawn_daemon(backend: type[Backend]) -> dict:
     log.info("Spawning daemon: %s", " ".join(cmd))
 
     stderr_dest: int = subprocess.DEVNULL
-    stderr_path = resolve_log_file("daemon-spawn", suffix=".stderr")
+    stderr_path = resolve_log_file("daemon-spawn", suffix=".stderr", env_key=f"{env_prefix}LOG_DIR")
 
     with contextlib.ExitStack() as stderr_cleanup:
         if stderr_path:
