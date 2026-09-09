@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
@@ -54,7 +56,9 @@ class DeleteLocalTypeResult(BaseModel):
 def register(mcp: FastMCP) -> None:
     @mcp.tool(annotations=ANNO_READ_ONLY, tags={"types"})
     @session.require_open
-    def get_local_type(name: str) -> GetLocalTypeResult:
+    def get_local_type(
+        name: Annotated[str, Field(min_length=1, max_length=256)],
+    ) -> GetLocalTypeResult:
         """Get detailed type information including members by name.
 
         For structs/unions, returns all member details (name, type, offset,

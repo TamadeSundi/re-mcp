@@ -15,7 +15,6 @@ from re_mcp_ghidra.exceptions import GhidraError
 from re_mcp_ghidra.helpers import (
     ANNO_READ_ONLY,
     Address,
-    Offset,
     format_address,
     paginate_iter,
     resolve_address,
@@ -24,6 +23,9 @@ from re_mcp_ghidra.session import session
 
 Phase06XrefLimit = Annotated[
     int, Field(description="Maximum number of references.", ge=1, le=64)
+]
+Phase06Offset = Annotated[
+    int, Field(description="Pagination offset.", ge=0, le=1_000_000)
 ]
 Phase06CallDepth = Annotated[
     int, Field(description="Call graph depth (exactly 1).", ge=1, le=1)
@@ -56,7 +58,7 @@ def register(mcp: FastMCP) -> None:
     @session.require_open
     def get_xrefs_to(
         address: Address,
-        offset: Offset = 0,
+        offset: Phase06Offset = 0,
         limit: Phase06XrefLimit = 64,
     ) -> dict:
         """Get all cross-references pointing TO an address."""
@@ -84,7 +86,7 @@ def register(mcp: FastMCP) -> None:
     @session.require_open
     def get_xrefs_from(
         address: Address,
-        offset: Offset = 0,
+        offset: Phase06Offset = 0,
         limit: Phase06XrefLimit = 64,
     ) -> dict:
         """Get all cross-references FROM an address."""

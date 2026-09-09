@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from fastmcp import FastMCP
-from re_mcp_ghidra.tools import data, search, xrefs
+from re_mcp_ghidra.tools import data, operands, search, typeinf, xrefs
 from re_mcp_ghidra.tools.functions import (
     MAX_PHASE06_DECOMPILE_CHARS,
     MAX_PHASE06_INSTRUCTIONS,
@@ -136,13 +136,18 @@ async def test_selected_pagination_and_function_reads_have_hard_bounds() -> None
     server = FastMCP("phase06-bounded-read-contract")
     xrefs.register(server)
     search.register(server)
+    operands.register(server)
+    typeinf.register(server)
 
     xrefs_to = await server.get_tool("get_xrefs_to")
     call_graph = await server.get_tool("get_call_graph")
     strings = await server.get_tool("get_strings")
     string_refs = await server.get_tool("find_code_by_string")
+    operand = await server.get_tool("get_operand_value")
+    local_type = await server.get_tool("get_local_type")
 
     assert xrefs_to.parameters["properties"]["limit"]["maximum"] == 64
+    assert xrefs_to.parameters["properties"]["offset"]["maximum"] == 1_000_000
     assert call_graph.parameters["properties"]["depth"] == {
         "default": 1,
         "description": "Call graph depth (exactly 1).",
@@ -151,6 +156,12 @@ async def test_selected_pagination_and_function_reads_have_hard_bounds() -> None
         "type": "integer",
     }
     assert strings.parameters["properties"]["limit"]["maximum"] == 32
+    assert strings.parameters["properties"]["offset"]["maximum"] == 1_000_000
+    assert strings.parameters["properties"]["filter_pattern"]["maxLength"] == 256
+    assert strings.parameters["properties"]["min_length"]["maximum"] == 512
     assert string_refs.parameters["properties"]["limit"]["maximum"] == 32
+    assert string_refs.parameters["properties"]["pattern"]["maxLength"] == 256
+    assert operand.parameters["properties"]["operand_index"]["maximum"] == 15
+    assert local_type.parameters["properties"]["name"]["maxLength"] == 256
     assert MAX_PHASE06_DECOMPILE_CHARS == 20_000
     assert MAX_PHASE06_INSTRUCTIONS == 512

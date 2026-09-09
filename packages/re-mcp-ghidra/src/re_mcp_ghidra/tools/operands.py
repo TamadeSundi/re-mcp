@@ -205,7 +205,7 @@ def register(mcp: FastMCP) -> None:
     @session.require_open
     def get_operand_value(
         address: Address,
-        operand_index: int = 0,
+        operand_index: Annotated[int, Field(ge=0, le=15)] = 0,
     ) -> GetOperandValueResult:
         """Get the resolved value of an instruction operand.
 

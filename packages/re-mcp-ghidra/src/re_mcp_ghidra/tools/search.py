@@ -15,7 +15,6 @@ from re_mcp_ghidra.exceptions import GhidraError
 from re_mcp_ghidra.helpers import (
     ANNO_READ_ONLY,
     Address,
-    FilterPattern,
     HexBytes,
     Limit,
     Offset,
@@ -28,6 +27,18 @@ from re_mcp_ghidra.session import session
 
 Phase06StringLimit = Annotated[
     int, Field(description="Maximum number of strings.", ge=1, le=32)
+]
+Phase06Offset = Annotated[
+    int, Field(description="Pagination offset.", ge=0, le=1_000_000)
+]
+Phase06FilterPattern = Annotated[
+    str, Field(description="Optional regex to filter results.", max_length=256)
+]
+Phase06RequiredPattern = Annotated[
+    str, Field(description="Required regex to filter strings.", min_length=1, max_length=256)
+]
+Phase06MinStringLength = Annotated[
+    int, Field(description="Minimum string length.", ge=1, le=512)
 ]
 
 
@@ -61,10 +72,10 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(annotations=ANNO_READ_ONLY, tags={"search", "strings"})
     @session.require_open
     def get_strings(
-        offset: Offset = 0,
+        offset: Phase06Offset = 0,
         limit: Phase06StringLimit = 32,
-        filter_pattern: FilterPattern = "",
-        min_length: int = 4,
+        filter_pattern: Phase06FilterPattern = "",
+        min_length: Phase06MinStringLength = 4,
     ) -> dict:
         """Get defined strings from the database with optional regex filter."""
         program = session.program
@@ -104,8 +115,8 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(annotations=ANNO_READ_ONLY, tags={"search", "strings"})
     @session.require_open
     def find_code_by_string(
-        pattern: str,
-        offset: Offset = 0,
+        pattern: Phase06RequiredPattern,
+        offset: Phase06Offset = 0,
         limit: Phase06StringLimit = 32,
     ) -> dict:
         """Find code references to strings matching a regex pattern.
