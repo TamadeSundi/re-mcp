@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
@@ -23,6 +25,10 @@ from re_mcp_ghidra.helpers import (
     resolve_address,
 )
 from re_mcp_ghidra.session import session
+
+Phase06StringLimit = Annotated[
+    int, Field(description="Maximum number of strings.", ge=1, le=32)
+]
 
 
 class StringItem(BaseModel):
@@ -56,7 +62,7 @@ def register(mcp: FastMCP) -> None:
     @session.require_open
     def get_strings(
         offset: Offset = 0,
-        limit: Limit = 100,
+        limit: Phase06StringLimit = 32,
         filter_pattern: FilterPattern = "",
         min_length: int = 4,
     ) -> dict:
@@ -79,6 +85,11 @@ def register(mcp: FastMCP) -> None:
                     val = val[1:-1]
                 if len(val) < min_length:
                     continue
+                if len(val) > 512:
+                    raise GhidraError(
+                        "string exceeds the bounded read profile",
+                        error_type="ResourceLimitExceeded",
+                    )
                 if filt and not filt.search(val):
                     continue
                 yield StringItem(
@@ -95,7 +106,7 @@ def register(mcp: FastMCP) -> None:
     def find_code_by_string(
         pattern: str,
         offset: Offset = 0,
-        limit: Limit = 50,
+        limit: Phase06StringLimit = 32,
     ) -> dict:
         """Find code references to strings matching a regex pattern.
 
@@ -124,6 +135,11 @@ def register(mcp: FastMCP) -> None:
                     val = val[1:-1]
                 if not filt.search(val):
                     continue
+                if len(val) > 512:
+                    raise GhidraError(
+                        "string exceeds the bounded read profile",
+                        error_type="ResourceLimitExceeded",
+                    )
 
                 str_addr = data.getAddress()
                 refs = ref_mgr.getReferencesTo(str_addr)

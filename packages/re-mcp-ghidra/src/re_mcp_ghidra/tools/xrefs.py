@@ -6,19 +6,28 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
+from re_mcp_ghidra.exceptions import GhidraError
 from re_mcp_ghidra.helpers import (
     ANNO_READ_ONLY,
     Address,
-    Limit,
     Offset,
     format_address,
     paginate_iter,
     resolve_address,
 )
 from re_mcp_ghidra.session import session
+
+Phase06XrefLimit = Annotated[
+    int, Field(description="Maximum number of references.", ge=1, le=64)
+]
+Phase06CallDepth = Annotated[
+    int, Field(description="Call graph depth (exactly 1).", ge=1, le=1)
+]
 
 
 class XrefTo(BaseModel):
@@ -48,7 +57,7 @@ def register(mcp: FastMCP) -> None:
     def get_xrefs_to(
         address: Address,
         offset: Offset = 0,
-        limit: Limit = 100,
+        limit: Phase06XrefLimit = 64,
     ) -> dict:
         """Get all cross-references pointing TO an address."""
         program = session.program
@@ -76,7 +85,7 @@ def register(mcp: FastMCP) -> None:
     def get_xrefs_from(
         address: Address,
         offset: Offset = 0,
-        limit: Limit = 100,
+        limit: Phase06XrefLimit = 64,
     ) -> dict:
         """Get all cross-references FROM an address."""
         program = session.program
@@ -103,23 +112,16 @@ def register(mcp: FastMCP) -> None:
     @session.require_open
     def get_call_graph(
         address: Address,
-        depth: int = 1,
+        depth: Phase06CallDepth = 1,
     ) -> CallGraphEntry:
         """Get the call graph around a function (callers and callees).
 
         Args:
             address: Function address.
-            depth: Recursion depth (1-3).
+            depth: Recursion depth (exactly 1).
         """
-        if depth < 1:
-            depth = 1
-        if depth > 3:
-            depth = 3
-
         func = session.program.getFunctionManager().getFunctionContaining(resolve_address(address))
         if func is None:
-            from re_mcp_ghidra.exceptions import GhidraError  # noqa: PLC0415
-
             raise GhidraError(f"No function at {address}", error_type="NotFound")
 
         return _build_call_graph(func, depth, set())
@@ -155,6 +157,11 @@ def register(mcp: FastMCP) -> None:
                                 "address": format_address(caller_func.getEntryPoint().getOffset()),
                             }
                         )
+                    if len(callers) > 32:
+                        raise GhidraError(
+                            "call graph callers exceed the bounded read profile",
+                            error_type="ResourceLimitExceeded",
+                        )
 
         # Callees
         callees = []
@@ -171,6 +178,11 @@ def register(mcp: FastMCP) -> None:
                                 "name": callee.getName(),
                                 "address": format_address(callee_key),
                             }
+                        )
+                    if len(callees) > 32:
+                        raise GhidraError(
+                            "call graph callees exceed the bounded read profile",
+                            error_type="ResourceLimitExceeded",
                         )
 
         return CallGraphEntry(

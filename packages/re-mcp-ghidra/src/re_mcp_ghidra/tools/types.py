@@ -71,10 +71,16 @@ def register(mcp: FastMCP) -> None:
         # Check if there's a function at this address
         func = func_mgr.getFunctionAt(addr)
         if func:
+            signature = func.getPrototypeString(False, False)
+            if len(signature) > 4_096:
+                raise GhidraError(
+                    "function signature exceeds the bounded read profile",
+                    error_type="ResourceLimitExceeded",
+                )
             return TypeInfoResult(
                 address=format_address(addr.getOffset()),
                 type_name=str(func.getReturnType()),
-                function_signature=func.getPrototypeString(False, False),
+                function_signature=signature,
             )
 
         # Check for data type

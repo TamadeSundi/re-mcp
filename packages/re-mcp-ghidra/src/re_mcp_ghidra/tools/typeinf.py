@@ -90,6 +90,11 @@ def register(mcp: FastMCP) -> None:
 
         if isinstance(dt, Structure):
             kind = "struct"
+            if dt.getNumComponents() > 64:
+                raise GhidraError(
+                    "type members exceed the bounded read profile",
+                    error_type="ResourceLimitExceeded",
+                )
             members = []
             for i in range(dt.getNumComponents()):
                 comp = dt.getComponent(i)
@@ -104,6 +109,11 @@ def register(mcp: FastMCP) -> None:
                 )
         elif isinstance(dt, Union):
             kind = "union"
+            if dt.getNumComponents() > 64:
+                raise GhidraError(
+                    "type members exceed the bounded read profile",
+                    error_type="ResourceLimitExceeded",
+                )
             members = []
             for i in range(dt.getNumComponents()):
                 comp = dt.getComponent(i)
@@ -119,18 +129,30 @@ def register(mcp: FastMCP) -> None:
         elif isinstance(dt, Enum):
             kind = "enum"
             enum_values = {}
-            for en_name in dt.getNames():
+            names = list(dt.getNames())
+            if len(names) > 64:
+                raise GhidraError(
+                    "enum values exceed the bounded read profile",
+                    error_type="ResourceLimitExceeded",
+                )
+            for en_name in names:
                 enum_values[en_name] = dt.getValue(en_name)
         elif isinstance(dt, TypeDef):
             kind = "typedef"
 
         cat = dt.getCategoryPath()
+        declaration = str(dt)
+        if len(declaration) > 4_096:
+            raise GhidraError(
+                "type declaration exceeds the bounded read profile",
+                error_type="ResourceLimitExceeded",
+            )
         return GetLocalTypeResult(
             name=dt.getName(),
             category=str(cat) if cat else "",
             size=dt.getLength(),
             kind=kind,
-            declaration=str(dt),
+            declaration=declaration,
             members=members,
             enum_values=enum_values,
         )

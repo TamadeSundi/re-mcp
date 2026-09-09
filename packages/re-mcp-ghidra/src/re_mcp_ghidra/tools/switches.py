@@ -91,6 +91,11 @@ def register(mcp: FastMCP) -> None:
 
         cases = []
         for i, (target_offset, _) in enumerate(sorted(targets.items())):
+            if i >= 64:
+                raise GhidraError(
+                    "switch cases exceed the bounded read profile",
+                    error_type="ResourceLimitExceeded",
+                )
             cases.append(
                 SwitchCase(
                     case_values=[i],

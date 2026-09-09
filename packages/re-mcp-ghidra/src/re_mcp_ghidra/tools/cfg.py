@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
+from re_mcp_ghidra.exceptions import GhidraError
 from re_mcp_ghidra.helpers import (
     ANNO_READ_ONLY,
     Address,
@@ -94,6 +95,11 @@ def register(mcp: FastMCP) -> None:
                 dest = ref.getDestinationBlock()
                 if dest is not None:
                     succs.append(format_address(dest.getMinAddress().getOffset()))
+                    if len(succs) > 64:
+                        raise GhidraError(
+                            "block successors exceed the bounded read profile",
+                            error_type="ResourceLimitExceeded",
+                        )
 
             # Get predecessors
             preds = []
@@ -103,6 +109,11 @@ def register(mcp: FastMCP) -> None:
                 src = ref.getSourceBlock()
                 if src is not None:
                     preds.append(format_address(src.getMinAddress().getOffset()))
+                    if len(preds) > 64:
+                        raise GhidraError(
+                            "block predecessors exceed the bounded read profile",
+                            error_type="ResourceLimitExceeded",
+                        )
 
             blocks.append(
                 BasicBlock(
@@ -113,6 +124,11 @@ def register(mcp: FastMCP) -> None:
                     predecessors=preds,
                 )
             )
+            if len(blocks) > 512:
+                raise GhidraError(
+                    "basic blocks exceed the bounded read profile",
+                    error_type="ResourceLimitExceeded",
+                )
 
         entry = func.getEntryPoint().getOffset()
         return GetBasicBlocksResult(

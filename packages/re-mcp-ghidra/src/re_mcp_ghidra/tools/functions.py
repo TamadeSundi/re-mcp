@@ -25,6 +25,10 @@ from re_mcp_ghidra.helpers import (
 from re_mcp_ghidra.models import FunctionSummary, RenameResult
 from re_mcp_ghidra.session import session
 
+MAX_PHASE06_DECOMPILE_CHARS = 20_000
+MAX_PHASE06_INSTRUCTIONS = 512
+MAX_PHASE06_METADATA_CHARS = 4_096
+
 
 class FunctionDetail(BaseModel):
     name: str
@@ -108,16 +112,26 @@ def register(mcp: FastMCP) -> None:
         start = entry.getOffset()
         end = body.getMaxAddress().getOffset() + 1 if body.getNumAddresses() > 0 else start
 
+        signature = func.getPrototypeString(False, False) or ""
+        comment = func.getComment() or ""
+        if (
+            len(signature) > MAX_PHASE06_METADATA_CHARS
+            or len(comment) > MAX_PHASE06_METADATA_CHARS
+        ):
+            raise GhidraError(
+                "function metadata exceeds the bounded read profile",
+                error_type="ResourceLimitExceeded",
+            )
         return FunctionDetail(
             name=func.getName(),
             start=format_address(start),
             end=format_address(end),
             size=int(body.getNumAddresses()),
             calling_convention=func.getCallingConventionName() or "",
-            signature=func.getPrototypeString(False, False) or "",
+            signature=signature,
             is_thunk=func.isThunk(),
             is_external=func.isExternal(),
-            comment=func.getComment() or "",
+            comment=comment,
             entry_point=format_address(start),
         )
 
@@ -147,6 +161,11 @@ def register(mcp: FastMCP) -> None:
                 )
 
             code = decomp_func.getC()
+            if len(code) > MAX_PHASE06_DECOMPILE_CHARS:
+                raise GhidraError(
+                    "decompilation exceeds the bounded read profile",
+                    error_type="ResourceLimitExceeded",
+                )
             return DecompilationResult(
                 function_name=func.getName(),
                 address=format_address(func.getEntryPoint().getOffset()),
@@ -188,6 +207,11 @@ def register(mcp: FastMCP) -> None:
                     operands=", ".join(operands),
                 )
             )
+            if len(instructions) > MAX_PHASE06_INSTRUCTIONS:
+                raise GhidraError(
+                    "disassembly exceeds the bounded read profile",
+                    error_type="ResourceLimitExceeded",
+                )
 
         entry = func.getEntryPoint().getOffset()
         end_addr = body.getMaxAddress().getOffset() + 1 if body.getNumAddresses() > 0 else entry

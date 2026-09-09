@@ -97,6 +97,11 @@ def register(mcp: FastMCP) -> None:
             )
 
         variables = stack_frame.getStackVariables()
+        if len(variables) > 64:
+            raise GhidraError(
+                "stack members exceed the bounded read profile",
+                error_type="ResourceLimitExceeded",
+            )
         members = []
         for var in variables:
             dt = var.getDataType()
@@ -179,6 +184,11 @@ def register(mcp: FastMCP) -> None:
                         storage=storage_desc,
                     )
                 )
+                if len(variables) > 64:
+                    raise GhidraError(
+                        "function variables exceed the bounded read profile",
+                        error_type="ResourceLimitExceeded",
+                    )
         finally:
             decomp.dispose()
 
