@@ -1699,6 +1699,15 @@ class WorkerPoolProvider(Provider):
         or ``{"status": "detached", ...}`` when other sessions still hold it.
         """
         async with self._lock:
+            # A missing request context must not become authority to terminate
+            # another live session's worker.  Keep the legacy no-context close
+            # only for a worker with no tracked sessions (or explicit force).
+            if not force and session_id is None and worker.session_count > 0:
+                raise BackendError(
+                    "Current session is unavailable for normal database close.",
+                    error_type="NotAttached",
+                    database=worker.database_id,
+                )
             if not force:
                 self.check_attached(worker, session_id)
             no_sessions_left = worker.detach(session_id)

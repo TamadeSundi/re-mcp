@@ -898,13 +898,33 @@ class TestCloseForSession:
         assert "db1" not in pool._id_to_path
 
     @pytest.mark.asyncio
-    async def test_terminate_when_session_none(self):
-        """None session falls back to legacy terminate behavior."""
+    async def test_session_none_cannot_terminate_other_attached_session(self):
         pool = _setup_pool([])
         worker = _add_worker(pool, "db1", {})
         worker.attach("s1")
 
+        with pytest.raises(BackendError, match="NotAttached"):
+            await pool.close_for_session(worker, None)
+        assert worker.session_count == 1
+        assert worker.is_attached("s1")
+        assert "db1" in pool._id_to_path
+
+    @pytest.mark.asyncio
+    async def test_terminate_when_session_none_and_no_tracked_sessions(self):
+        """The legacy no-context close remains valid for an idle worker."""
+        pool = _setup_pool([])
+        worker = _add_worker(pool, "db1", {})
+
         result = await pool.close_for_session(worker, None)
+        assert result["status"] == "closed"
+
+    @pytest.mark.asyncio
+    async def test_force_when_session_none_preserves_explicit_override(self):
+        pool = _setup_pool([])
+        worker = _add_worker(pool, "db1", {})
+        worker.attach("s1")
+
+        result = await pool.close_for_session(worker, None, force=True)
         assert result["status"] == "closed"
 
     @pytest.mark.asyncio
