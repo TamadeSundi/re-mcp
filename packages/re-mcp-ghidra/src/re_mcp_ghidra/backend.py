@@ -35,6 +35,7 @@ class GhidraBackend:
             management_tools=MANAGEMENT_TOOLS,
             env_prefix="GHIDRA_MCP_",
             state_dir_name="re-mcp-ghidra",
+            transient_read_only_sessions=True,
         )
 
     @staticmethod

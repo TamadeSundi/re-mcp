@@ -146,6 +146,9 @@ class BackendInfo:
     state_dir_name: str = "re-mcp"
     """Subdirectory name for daemon state files."""
 
+    transient_read_only_sessions: bool = False
+    """Whether read-only routed calls attach only for their call lifetime."""
+
 
 @runtime_checkable
 class Backend(Protocol):

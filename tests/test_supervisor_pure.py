@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import jsonschema
 import mcp.types as types
 import pytest
+from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.resources.template import ResourceTemplate as FastMCPResourceTemplate
@@ -57,6 +58,7 @@ from re_mcp.worker_provider import (
     extract_db_prefix,
     prefix_uri,
 )
+from re_mcp_ghidra.backend import GhidraBackend
 from re_mcp_ida.backend import IDABackend
 from re_mcp_ida.exceptions import IDAError
 from re_mcp_ida.transforms import MANAGEMENT_TOOLS, PINNED_TOOLS
@@ -280,7 +282,12 @@ def test_canonical_path_fat_arch_dedups_symlinked_slices(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _make_mcp_tool(name: str, tags: set[str] | None = None) -> types.Tool:
+def _make_mcp_tool(
+    name: str,
+    tags: set[str] | None = None,
+    *,
+    read_only: bool | None = None,
+) -> types.Tool:
     """Create a minimal MCP Tool schema for testing.
 
     Uses ``model_construct`` because ``types.Tool(...)`` validates away the
@@ -294,6 +301,10 @@ def _make_mcp_tool(name: str, tags: set[str] | None = None) -> types.Tool:
         name=name,
         description=f"{name} tool",
         inputSchema={"type": "object", "properties": {}},
+        annotations=(
+            None if read_only is None
+            else types.ToolAnnotations(readOnlyHint=read_only)
+        ),
         meta=meta,
     )
 
@@ -334,9 +345,11 @@ _SENTINEL_TOOL = _make_mcp_tool("_sentinel")
 def _setup_pool(
     tools: list[types.Tool],
     resource_templates: list[FastMCPResourceTemplate] | None = None,
+    *,
+    backend=IDABackend,
 ) -> WorkerPoolProvider:
     """Create a WorkerPoolProvider with pre-populated schemas (skipping bootstrap)."""
-    pool = WorkerPoolProvider(backend=IDABackend)
+    pool = WorkerPoolProvider(backend=backend)
     all_tools = [_SENTINEL_TOOL, *tools]
     pool._bootstrapped = True
 
@@ -505,6 +518,46 @@ class TestWorkerSessionTracking:
         w.attach("c")
         assert w.session_count == 3
 
+    def test_persistent_and_transient_counts_are_distinct_unique_sessions(self):
+        w = Worker(database_id="db", file_path="/tmp/db")
+        w.attach("direct")
+        w.attach_transient("model")
+        w.attach_transient("model")
+        w.attach_transient("direct")
+
+        assert w.persistent_session_count == 1
+        assert w.transient_session_count == 2
+        assert w.transient_call_count == 3
+        assert w.session_count == 2
+        assert w.is_persistently_attached("direct")
+        assert not w.is_persistently_attached("model")
+        assert w.is_attached("model")
+
+        w.detach_transient("model")
+        assert w.transient_session_count == 2
+        assert w.transient_call_count == 2
+        w.detach_transient("model")
+        assert w.transient_session_count == 1
+        assert w.session_count == 1
+
+    def test_disconnect_detach_leaves_transient_until_call_finally(self):
+        w = Worker(database_id="db", file_path="/tmp/db")
+        w.attach("same")
+        w.attach_transient("same")
+        w.attach_transient("same")
+
+        assert not w.detach("same")
+        assert not w.detach("same")
+        assert w.persistent_session_count == 0
+        assert w.transient_session_count == 1
+        assert w.transient_call_count == 2
+        w.detach_transient("same")
+        w.detach_transient("same")
+        w.detach_transient("same")
+        assert w.transient_session_count == 0
+        assert w.transient_call_count == 0
+        assert w.session_count == 0
+
 
 # ---------------------------------------------------------------------------
 # check_attached
@@ -539,6 +592,13 @@ class TestCheckAttached:
         # No sessions attached — backward compat
         pool.check_attached(worker, "session_x")  # should not raise
 
+    def test_transient_read_does_not_grant_persistent_authority(self):
+        pool = _setup_pool([])
+        worker = _add_worker(pool, "db1", {})
+        worker.attach_transient("reader")
+        with pytest.raises(BackendError, match="NotAttached"):
+            pool.check_attached(worker, "reader")
+
 
 # ---------------------------------------------------------------------------
 # build_database_list with session info
@@ -557,6 +617,9 @@ class TestBuildDatabaseListSessions:
         result = pool.build_database_list()
         db_entry = result["databases"][0]
         assert db_entry["session_count"] == 2
+        assert db_entry["persistent_session_count"] == 2
+        assert db_entry["transient_session_count"] == 0
+        assert db_entry["transient_call_count"] == 0
         assert "attached" not in db_entry  # no caller_session_id
 
     def test_attached_true_when_caller_attached(self):
@@ -584,6 +647,25 @@ class TestBuildDatabaseListSessions:
         result = pool.build_database_list()
         db_entry = result["databases"][0]
         assert db_entry["session_count"] == 0
+        assert db_entry["persistent_session_count"] == 0
+        assert db_entry["transient_session_count"] == 0
+        assert db_entry["transient_call_count"] == 0
+
+    def test_inventory_projects_transient_union_without_granting_close_authority(self):
+        pool = _setup_pool([])
+        worker = _add_worker(pool, "db1", {})
+        worker.attach("direct")
+        worker.attach_transient("model")
+        worker.attach_transient("model")
+
+        entry = pool.build_database_list(caller_session_id="model")["databases"][0]
+        assert entry["persistent_session_count"] == 1
+        assert entry["transient_session_count"] == 1
+        assert entry["transient_call_count"] == 2
+        assert entry["session_count"] == 2
+        assert entry["attached"] is True
+        with pytest.raises(BackendError, match="NotAttached"):
+            pool.check_attached(worker, "model")
 
     @pytest.mark.asyncio
     async def test_analyzing_flag_present_when_task_running(self):
@@ -750,6 +832,214 @@ def _error_call_result(msg: str) -> types.CallToolResult:
     )
 
 
+class TestTransientReadOnlyRoutingSessions:
+    """Ghidra read-only routed calls own DB references only while in flight."""
+
+    @staticmethod
+    def _pool_and_worker(*, read_only: bool = True, backend=GhidraBackend):
+        pool = _setup_pool(
+            [_make_mcp_tool("get_function", read_only=read_only)],
+            backend=backend,
+        )
+        worker = _add_worker(pool, "db1", {})
+        worker.attach("direct")
+        return pool, worker, pool._routing_tools["get_function"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["success", "tool-error", "exception", "cancel"])
+    async def test_every_terminal_path_releases_transient_session(self, outcome):
+        pool, worker, tool = self._pool_and_worker()
+        ctx = _FakeCtx("model")
+
+        async def proxy(*_args):
+            assert worker.persistent_session_count == 1
+            assert worker.transient_session_count == 1
+            assert worker.transient_call_count == 1
+            if outcome == "tool-error":
+                return _error_call_result("private worker failure")
+            if outcome == "exception":
+                raise RuntimeError("private proxy failure")
+            if outcome == "cancel":
+                raise asyncio.CancelledError()
+            return _ok_result({"name": "root"})
+
+        pool.proxy_to_worker = proxy
+        with patch("re_mcp.worker_provider.try_get_context", return_value=ctx):
+            if outcome == "success":
+                await tool.run({"database": "db1"})
+            elif outcome == "tool-error":
+                with pytest.raises(ToolError):
+                    await tool.run({"database": "db1"})
+            elif outcome == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await tool.run({"database": "db1"})
+            else:
+                with pytest.raises(RuntimeError, match="private proxy failure"):
+                    await tool.run({"database": "db1"})
+
+        assert worker.persistent_session_count == 1
+        assert worker.transient_session_count == 0
+        assert worker.transient_call_count == 0
+        assert worker.session_count == 1
+
+    @pytest.mark.asyncio
+    async def test_same_session_parallel_calls_hold_one_sid_until_both_finish(self):
+        pool, worker, tool = self._pool_and_worker()
+        ctx = _FakeCtx("model")
+        entered = 0
+        both_entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def proxy(*_args):
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await both_entered.wait()
+            await release.wait()
+            return _ok_result({"name": "root"})
+
+        pool.proxy_to_worker = proxy
+        with patch("re_mcp.worker_provider.try_get_context", return_value=ctx):
+            tasks = [asyncio.create_task(tool.run({"database": "db1"})) for _ in range(2)]
+            await asyncio.wait_for(both_entered.wait(), timeout=1)
+            assert worker.transient_session_count == 1
+            assert worker.transient_call_count == 2
+            assert worker.session_count == 2
+            release.set()
+            await asyncio.gather(*tasks)
+
+        assert worker.transient_session_count == 0
+        assert worker.transient_call_count == 0
+        assert worker.session_count == 1
+
+    @pytest.mark.asyncio
+    async def test_external_task_cancellation_waits_for_transient_release(self):
+        pool, worker, tool = self._pool_and_worker()
+        ctx = _FakeCtx("model")
+        entered = asyncio.Event()
+
+        async def proxy(*_args):
+            entered.set()
+            await asyncio.Future()
+
+        pool.proxy_to_worker = proxy
+        with patch("re_mcp.worker_provider.try_get_context", return_value=ctx):
+            task = asyncio.create_task(tool.run({"database": "db1"}))
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            assert worker.transient_call_count == 1
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert worker.transient_session_count == 0
+        assert worker.transient_call_count == 0
+        assert worker.session_count == 1
+
+    @pytest.mark.asyncio
+    async def test_disconnect_before_call_finally_keeps_last_close_busy(self):
+        pool, worker, tool = self._pool_and_worker()
+        ctx = _FakeCtx("model")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def proxy(*_args):
+            entered.set()
+            await release.wait()
+            return _ok_result({"name": "root"})
+
+        pool.proxy_to_worker = proxy
+        with patch("re_mcp.worker_provider.try_get_context", return_value=ctx):
+            call = asyncio.create_task(tool.run({"database": "db1"}))
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            assert len(ctx.session._exit_stack.callbacks) == 1
+            await ctx.session._exit_stack.callbacks[0](None, None, None)
+            assert worker.transient_call_count == 1
+            with pytest.raises(BackendError, match="Busy"):
+                await pool.close_for_session(worker, "direct")
+            assert worker.is_persistently_attached("direct")
+            release.set()
+            await call
+
+        assert worker.transient_call_count == 0
+        closed = await pool.close_for_session(worker, "direct")
+        assert closed["status"] == "closed"
+
+    @pytest.mark.asyncio
+    async def test_five_distinct_sessions_are_counted_and_released(self):
+        pool, worker, tool = self._pool_and_worker()
+        contexts = {f"model-{index}": _FakeCtx(f"sid-{index}") for index in range(5)}
+        all_entered = asyncio.Event()
+        entered = 0
+        release = asyncio.Event()
+
+        def current_context():
+            task = asyncio.current_task()
+            assert task is not None
+            return contexts[task.get_name()]
+
+        async def proxy(*_args):
+            nonlocal entered
+            entered += 1
+            if entered == 5:
+                all_entered.set()
+            await all_entered.wait()
+            await release.wait()
+            return _ok_result({"name": "root"})
+
+        pool.proxy_to_worker = proxy
+        with patch("re_mcp.worker_provider.try_get_context", side_effect=current_context):
+            tasks = [
+                asyncio.create_task(
+                    tool.run({"database": "db1"}), name=f"model-{index}"
+                )
+                for index in range(5)
+            ]
+            await asyncio.wait_for(all_entered.wait(), timeout=1)
+            assert worker.transient_session_count == 5
+            assert worker.transient_call_count == 5
+            assert worker.session_count == 6
+            release.set()
+            await asyncio.gather(*tasks)
+
+        assert worker.transient_session_count == 0
+        assert worker.transient_call_count == 0
+        assert worker.session_count == 1
+
+    @pytest.mark.asyncio
+    async def test_non_read_only_and_non_ghidra_routes_keep_persistent_semantics(self):
+        for read_only, backend in ((False, GhidraBackend), (True, IDABackend)):
+            pool, worker, tool = self._pool_and_worker(
+                read_only=read_only, backend=backend
+            )
+            pool.proxy_to_worker = AsyncMock(return_value=_ok_result({"name": "root"}))
+            ctx = _FakeCtx("model")
+            with patch("re_mcp.worker_provider.try_get_context", return_value=ctx):
+                await tool.run({"database": "db1"})
+            assert worker.is_persistently_attached("model")
+            assert worker.transient_call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_disposable_fastmcp_call_releases_before_response(self):
+        pool, worker, _tool = self._pool_and_worker()
+        server = FastMCP("transient-read-proof")
+        server.add_provider(pool)
+
+        async def proxy(*_args):
+            assert worker.persistent_session_count == 1
+            assert worker.transient_session_count == 1
+            assert worker.transient_call_count == 1
+            return _ok_result({"name": "root"})
+
+        pool.proxy_to_worker = proxy
+        async with Client(server) as client:
+            result = await client.call_tool("get_function", {"database": "db1"})
+            assert not result.is_error
+            assert worker.persistent_session_count == 1
+            assert worker.transient_session_count == 0
+            assert worker.transient_call_count == 0
+            assert worker.session_count == 1
+
+
 class TestBackgroundAnalysis:
     """Test WorkerPoolProvider._background_analysis coroutine."""
 
@@ -887,6 +1177,35 @@ class TestCloseForSession:
         assert "db1" in pool._id_to_path
 
     @pytest.mark.asyncio
+    async def test_last_persistent_close_is_busy_while_transient_read_active(self):
+        pool = _setup_pool([])
+        worker = _add_worker(pool, "db1", {})
+        worker.attach("direct")
+        worker.attach_transient("model")
+
+        with pytest.raises(BackendError, match="Busy") as raised:
+            await pool.close_for_session(worker, "direct")
+        assert raised.value.error_type == "Busy"
+        assert worker.is_persistently_attached("direct")
+        assert worker.transient_call_count == 1
+        assert "db1" in pool._id_to_path
+
+    @pytest.mark.asyncio
+    async def test_nonlast_persistent_close_preserves_active_transient_and_worker(self):
+        pool = _setup_pool([])
+        worker = _add_worker(pool, "db1", {})
+        worker.attach("direct-a")
+        worker.attach("direct-b")
+        worker.attach_transient("model")
+
+        result = await pool.close_for_session(worker, "direct-a")
+        assert result == {
+            "status": "detached", "database": "db1", "remaining_sessions": 2,
+        }
+        assert worker.is_persistently_attached("direct-b")
+        assert worker.is_attached("model")
+
+    @pytest.mark.asyncio
     async def test_terminate_when_force(self):
         pool = _setup_pool([])
         worker = _add_worker(pool, "db1", {})
@@ -995,6 +1314,19 @@ class TestDetachAll:
         assert len(pool._workers) == 0
 
     @pytest.mark.asyncio
+    async def test_terminating_detach_is_busy_during_transient_read(self):
+        pool = _setup_pool([])
+        worker = _add_worker(pool, "db1", {})
+        worker.attach("s1")
+        worker.attach_transient("s1")
+
+        with pytest.raises(BackendError, match="Busy"):
+            await pool.detach_all("s1")
+        assert worker.is_persistently_attached("s1")
+        assert worker.transient_call_count == 1
+        assert "db1" in pool._id_to_path
+
+    @pytest.mark.asyncio
     async def test_skips_inactive_workers(self):
         pool = _setup_pool([])
         w1 = _add_worker(pool, "db1", {})
@@ -1085,6 +1417,8 @@ class TestEnsureSessionCleanup:
         pool = _setup_pool([])
         worker = _add_worker(pool, "db1", {})
         worker.attach("s1")
+        worker.attach_transient("s1")
+        worker.attach_transient("s1")
 
         ctx = _FakeCtx("s1")
         pool.ensure_session_cleanup(ctx)
@@ -1093,7 +1427,14 @@ class TestEnsureSessionCleanup:
         # the registered callback with the __aexit__ signature.
         await ctx.session._exit_stack.callbacks[0](None, None, None)
         assert "s1" not in pool._registered_sessions
-        # Worker is detached but NOT removed — it survives the session cycle.
+        # Persistent ownership is gone, but active calls stay visible until
+        # their own finally blocks release the transient refs.
+        assert worker.persistent_session_count == 0
+        assert worker.session_count == 1
+        assert worker.transient_session_count == 1
+        assert worker.transient_call_count == 2
+        worker.detach_transient("s1")
+        worker.detach_transient("s1")
         assert worker.session_count == 0
         assert "db1" in pool._id_to_path
 

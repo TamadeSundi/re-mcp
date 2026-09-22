@@ -275,6 +275,7 @@ class Worker:
     last_activity: float = field(default_factory=time.monotonic)
     _active_calls: int = 0
     _sessions: set[str] = field(default_factory=set)
+    _transient_reads: dict[str, int] = field(default_factory=dict)
     _analysis_task: asyncio.Task[None] | None = None
     _analysis_error: str | None = None
     _ready_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -302,18 +303,53 @@ class Worker:
         """
         if session_id is not None:
             self._sessions.discard(session_id)
-        return len(self._sessions) == 0
+        return self.session_count == 0
 
-    def is_attached(self, session_id: str | None) -> bool:
-        """``True`` if *session_id* is registered, or if *session_id* is ``None``."""
+    def attach_transient(self, session_id: str | None) -> None:
+        """Count one in-flight read without granting persistent ownership."""
+        if session_id is not None:
+            self._transient_reads[session_id] = (
+                self._transient_reads.get(session_id, 0) + 1
+            )
+
+    def detach_transient(self, session_id: str | None) -> None:
+        """Release one in-flight read; repeated disconnect cleanup is harmless."""
+        if session_id is None:
+            return
+        count = self._transient_reads.get(session_id, 0)
+        if count <= 1:
+            self._transient_reads.pop(session_id, None)
+        else:
+            self._transient_reads[session_id] = count - 1
+
+    def is_persistently_attached(self, session_id: str | None) -> bool:
+        """Return whether a concrete session owns an explicit open reference."""
         if session_id is None:
             return True
         return session_id in self._sessions
 
+    def is_attached(self, session_id: str | None) -> bool:
+        """Return whether a session has a persistent or in-flight reference."""
+        if session_id is None:
+            return True
+        return session_id in self._sessions or session_id in self._transient_reads
+
+    @property
+    def persistent_session_count(self) -> int:
+        return len(self._sessions)
+
+    @property
+    def transient_session_count(self) -> int:
+        return len(self._transient_reads)
+
+    @property
+    def transient_call_count(self) -> int:
+        return sum(self._transient_reads.values())
+
     @property
     def session_count(self) -> int:
-        """Number of sessions currently attached to this worker."""
-        return len(self._sessions)
+        """Number of unique persistent or in-flight sessions."""
+        return len(self._sessions | self._transient_reads.keys())
 
     # ------------------------------------------------------------------
     # State helpers
@@ -413,6 +449,7 @@ class RoutingTool(Tool):
 
     task_config: TaskConfig = TaskConfig(mode="optional")
     _provider: WorkerPoolProvider = PrivateAttr()
+    _transient_read_only: bool = PrivateAttr(default=False)
 
     def __init__(self, provider: WorkerPoolProvider, mcp_tool: types.Tool, **kwargs: Any):
         # Build parameters with injected 'database' field
@@ -444,6 +481,13 @@ class RoutingTool(Tool):
             **kwargs,
         )
         self._provider = provider
+        self._transient_read_only = bool(
+            provider._backend_info.transient_read_only_sessions
+            and mcp_tool.annotations is not None
+            and mcp_tool.annotations.model_dump(by_alias=True).get(
+                "readOnlyHint"
+            ) is True
+        )
 
     async def run(self, arguments: dict[str, Any], **kwargs: Any) -> ToolResult:
         """Extract database, resolve worker, dispatch call."""
@@ -460,23 +504,23 @@ class RoutingTool(Tool):
                 "wait_for_analysis to block until analysis completes, then retry."
             )
 
-        # Implicitly attach the calling session so the reference count
-        # reflects actual usage, not just explicit open_database calls.
-        # Safe without _lock: close_for_session removes the worker from
-        # _workers (under _lock) before terminating, so resolve_worker()
-        # above would already have failed for a worker being shut down.
+        async def dispatch() -> ToolResult:
+            result = await self._provider.proxy_to_worker(
+                worker, self.name, arguments
+            )
+            enriched = _enrich_result(result, worker.database_id)
+            if enriched.isError:
+                raise ToolError(_extract_error_text(enriched))
+            return ToolResult(
+                content=enriched.content,
+                structured_content=enriched.structuredContent,
+            )
+
+        if self._transient_read_only:
+            async with self._provider.transient_read_session(worker):
+                return await dispatch()
         self._provider.attach_current_session(worker)
-
-        result = await self._provider.proxy_to_worker(worker, self.name, arguments)
-        enriched = _enrich_result(result, worker.database_id)
-
-        if enriched.isError:
-            raise ToolError(_extract_error_text(enriched))
-
-        return ToolResult(
-            content=enriched.content,
-            structured_content=enriched.structuredContent,
-        )
+        return await dispatch()
 
 
 # ---------------------------------------------------------------------------
@@ -1022,6 +1066,38 @@ class WorkerPoolProvider(Provider):
             worker.attach(ctx.session_id)
             self.ensure_session_cleanup(ctx)
 
+    @asynccontextmanager
+    async def transient_read_session(self, worker: Worker) -> AsyncIterator[None]:
+        """Hold one Ghidra read reference for exactly one routed call."""
+        ctx = try_get_context()
+        sid = None if ctx is None else ctx.session_id
+        if sid is None:
+            yield
+            return
+        self.ensure_session_cleanup(ctx)
+        async with self._lock:
+            current = self._workers.get(worker.file_path)
+            if current is not worker or worker.state in _INACTIVE_STATES:
+                raise BackendError(
+                    f"Database not found: '{worker.database_id}'.",
+                    error_type="NotFound",
+                    available_databases=self._available_databases(),
+                )
+            worker.attach_transient(sid)
+        try:
+            yield
+        finally:
+            async def release() -> None:
+                async with self._lock:
+                    worker.detach_transient(sid)
+
+            release_task = asyncio.create_task(release())
+            try:
+                await asyncio.shield(release_task)
+            except asyncio.CancelledError:
+                await asyncio.shield(release_task)
+                raise
+
     def ensure_session_cleanup(self, ctx: Context | None) -> None:
         """Register a one-time disconnect callback for *ctx*'s session.
 
@@ -1091,7 +1167,7 @@ class WorkerPoolProvider(Provider):
         """
         if session_id is None or worker.session_count == 0:
             return
-        if not worker.is_attached(session_id):
+        if not worker.is_persistently_attached(session_id):
             raise BackendError(
                 f"Database '{worker.database_id}' is not attached to the current session. "
                 "Use force=True to override.",
@@ -1710,6 +1786,17 @@ class WorkerPoolProvider(Provider):
                 )
             if not force:
                 self.check_attached(worker, session_id)
+                if (
+                    session_id is not None
+                    and worker.persistent_session_count == 1
+                    and worker.is_persistently_attached(session_id)
+                    and worker.transient_call_count > 0
+                ):
+                    raise BackendError(
+                        "Database has active read calls.",
+                        error_type="Busy",
+                        database=worker.database_id,
+                    )
             no_sessions_left = worker.detach(session_id)
             should_terminate = force or session_id is None or no_sessions_left
 
@@ -1903,6 +1990,20 @@ class WorkerPoolProvider(Provider):
         # terminate decision.
         to_terminate: list[Worker] = []
         async with self._lock:
+            if terminate:
+                busy = next((
+                    worker
+                    for worker in self._workers.values()
+                    if worker.state != WorkerState.DEAD
+                    and worker.is_attached(session_id)
+                    and worker.transient_call_count > 0
+                ), None)
+                if busy is not None:
+                    raise BackendError(
+                        "Database has active read calls.",
+                        error_type="Busy",
+                        database=busy.database_id,
+                    )
             for path, worker in list(self._workers.items()):
                 if worker.state == WorkerState.DEAD:
                     continue
@@ -1939,6 +2040,9 @@ class WorkerPoolProvider(Provider):
                 entry["state"] = w.state.name.lower()
             entry.update(w.metadata)
             entry["session_count"] = w.session_count
+            entry["persistent_session_count"] = w.persistent_session_count
+            entry["transient_session_count"] = w.transient_session_count
+            entry["transient_call_count"] = w.transient_call_count
             if w.opening:
                 entry["opening"] = True
             if w.spawn_error:
